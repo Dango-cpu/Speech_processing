@@ -1,24 +1,22 @@
 # faster-phowhisper
 
 `faster-phowhisper` is a Streamlit application for Vietnamese speech recognition
-and English translation. It supports offline file transcription and browser
-microphone streaming, exposes the local Streamlit server through ngrok, and uses
-PhoWhisper for ASR in every path.
+with PhoWhisper. It supports offline audio files, browser microphone streaming,
+GPU execution on local machines or Colab/Kaggle, and public sharing through
+ngrok.
 
-## What the app uses
+The project is ASR-only.
 
-- Vietnamese ASR: PhoWhisper only, for both ASR backends.
+## What The App Uses
+
+- Vietnamese ASR: PhoWhisper.
 - Faster backend: `faster-whisper` with a CTranslate2-converted PhoWhisper
   checkpoint.
 - Compatibility backend: `transformers` with `WhisperForConditionalGeneration`
   and `WhisperProcessor`.
 - Cascaded Encoder backend: a PyTorch inference path for checkpoints exported by
   `notebooks/train_cascaded_phowhisper_colab_kaggle.ipynb`.
-- Translation: `Helsinki-NLP/opus-mt-vi-en` through `transformers`.
-
-There is no direct Whisper translation mode. Every mode first produces a
-Vietnamese transcript with PhoWhisper, then translates that text with
-`opus-mt-vi-en`.
+- UI/runtime: Streamlit, `streamlit-webrtc`, and ngrok.
 
 ## Project Structure
 
@@ -35,14 +33,14 @@ Vietnamese transcript with PhoWhisper, then translates that text with
 ├── pipeline.py
 ├── pyproject.toml
 ├── README.md
-├── translate/
-│   ├── __init__.py
-│   └── opus_mt.py
-└── tunnel.py
+├── tunnel.py
+└── notebooks/
+    ├── run_faster_phowhisper_colab_kaggle.ipynb
+    └── train_cascaded_phowhisper_colab_kaggle.ipynb
 ```
 
-Older repository folders may still exist, but the Streamlit app above is the
-entry point for this project.
+Older repository folders may still exist, but `app.py` is the Streamlit entry
+point for this app.
 
 ## Install
 
@@ -58,19 +56,18 @@ Install dependencies:
 uv sync
 ```
 
-The `pyproject.toml` pins the PyTorch source to the CUDA 12.8 PyTorch index:
+The `pyproject.toml` pins PyTorch to the CUDA 12.8 PyTorch index:
 
 ```toml
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 ```
 
-CPU fallback is automatic when CUDA is not available.
+CPU fallback is automatic when CUDA is unavailable.
 
-## Configure ngrok
+## Configure Ngrok
 
-Create an ngrok account, copy your authtoken, and set it before launching the
-app.
+Set your ngrok authtoken before launching:
 
 PowerShell:
 
@@ -84,20 +81,38 @@ macOS/Linux:
 export NGROK_AUTHTOKEN="your-ngrok-token"
 ```
 
-If `NGROK_AUTHTOKEN` is missing, the app still runs locally and shows a graceful
-sidebar warning with setup instructions.
+If `NGROK_AUTHTOKEN` is missing, the app still runs locally and shows setup
+instructions in the sidebar.
 
-## Run
+## Run Locally
 
 ```bash
 uv run streamlit run app.py
 ```
 
-When `NGROK_AUTHTOKEN` is set, the app opens an ngrok tunnel for the Streamlit
-port and prints the public URL in the terminal. The same URL appears in the
-Streamlit sidebar.
+When `NGROK_AUTHTOKEN` is set, the app opens an ngrok tunnel and displays the
+public URL in the sidebar.
 
-## Run on Colab or Kaggle
+## Streamlit Model Loading Pattern
+
+The app follows the usual Streamlit pattern for NLP/ASR projects:
+
+- model-loading functions are wrapped with `st.cache_resource`;
+- the sidebar shows backend, model path, and checkpoint status;
+- `Load selected ASR model` loads the selected model before inference;
+- actual transcription also loads lazily, so the first run works even if the
+  user skips manual preload;
+- only the selected ASR backend is loaded, avoiding unnecessary memory use.
+
+Useful environment defaults:
+
+```bash
+APP_DEFAULT_DEVICE=cuda
+APP_DEFAULT_COMPUTE_TYPE=float16
+APP_DEFAULT_ASR_BACKEND=transformers
+```
+
+## Run On Colab Or Kaggle
 
 Use:
 
@@ -105,20 +120,22 @@ Use:
 notebooks/run_faster_phowhisper_colab_kaggle.ipynb
 ```
 
-The notebook can use the repository files already present in the runtime, or it
-can clone a repository URL you provide in `GITHUB_REPO_URL`. It installs with
-`uv sync`, reads `NGROK_AUTHTOKEN` and optional `HF_TOKEN` from Colab/Kaggle
-secrets, opens an ngrok tunnel, sets `APP_PUBLIC_URL`, and starts:
+The notebook can use files already present in the runtime, or it can clone a
+repository URL you provide in `GITHUB_REPO_URL`. It installs with `uv sync`,
+checks CUDA availability, sets GPU defaults, reads `NGROK_AUTHTOKEN` and
+optional `HF_TOKEN` from Colab/Kaggle secrets, opens an ngrok tunnel, sets
+`APP_PUBLIC_URL`, and starts:
 
 ```bash
 uv run streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 ```
 
 For hosted runtimes, upload or mount local checkpoint folders before selecting
-checkpoint-backed modes in the app:
+checkpoint-backed modes:
 
 - Faster-Whisper: `checkpoints/phowhisper-base-ct2/model.bin`
-- Cascaded Encoder: `checkpoints/cascaded_phowhisper_ckpt/step_*/cascaded_phowhisper.pt`
+- Cascaded Encoder:
+  `checkpoints/cascaded_phowhisper_ckpt/step_*/cascaded_phowhisper.pt`
 
 ## Faster-Whisper PhoWhisper Checkpoints
 
@@ -130,7 +147,7 @@ checkpoints/phowhisper-base-ct2
 ```
 
 If that directory is missing, or if it does not contain `model.bin`, the app
-will explain that the checkpoint must be converted first.
+explains that the checkpoint must be converted first.
 
 One conversion path is:
 
@@ -152,12 +169,9 @@ uv run ct2-transformers-converter \
   --quantization int8
 ```
 
-Then select the local converted directory in the sidebar as the custom
-PhoWhisper model/path while using the Faster-Whisper backend.
-
 ## Cascaded Encoder Checkpoints
 
-The Cascaded Encoder backend prefers the training notebook artifact:
+The Cascaded Encoder backend expects the training notebook export:
 
 ```text
 notebooks/train_cascaded_phowhisper_colab_kaggle.ipynb
@@ -179,64 +193,51 @@ Copy or train/export that folder under `checkpoints/`, for example:
 checkpoints/cascaded_phowhisper_ckpt/step_500/cascaded_phowhisper.pt
 ```
 
-In the Streamlit sidebar, choose `Cascaded Encoder backend`. The default path is:
+The app can load a specific `step_*` directory, the `.pt` file directly, or a
+root directory containing multiple `step_*` folders. If multiple steps exist,
+the highest-numbered step is selected.
 
-```text
-checkpoints/cascaded_phowhisper_ckpt
-```
+The Cascaded Encoder path is a PyTorch research/compatibility path. It is not a
+CTranslate2 runtime.
 
-If the root contains multiple `step_*` folders, the app automatically loads the
-highest-numbered step. You may also point the custom model/path directly at a
-specific `step_*` directory or at `cascaded_phowhisper.pt`.
+## Modes
 
-This backend is a PyTorch research/compatibility path, not a CTranslate2
-runtime. It reconstructs the notebook architecture from the checkpoint metadata,
-loads the saved `model_state_dict`, decodes Vietnamese with a simple greedy
-decoder, and then sends the transcript through `Helsinki-NLP/opus-mt-vi-en`.
-
-## Mode Combinations
-
-### Faster-Whisper backend + Offline mode
+### Faster-Whisper + Offline
 
 Upload a `wav`, `mp3`, or `m4a` file. The app transcribes the full file with a
-CTranslate2-converted PhoWhisper checkpoint through `faster-whisper`, using
-built-in VAD/chunking. Each Vietnamese segment is translated with
-`Helsinki-NLP/opus-mt-vi-en`.
+CTranslate2-converted PhoWhisper checkpoint through `faster-whisper`, using its
+VAD/chunking support.
 
-### Faster-Whisper backend + Streaming mode
+### Faster-Whisper + Streaming
 
 The browser microphone is captured through `streamlit-webrtc`. Audio is kept in
-a rolling buffer, finalized in short chunks, transcribed with PhoWhisper through
-`faster-whisper`, and translated chunk by chunk with `opus-mt-vi-en`.
+a rolling buffer, finalized in short chunks, and transcribed with PhoWhisper
+through `faster-whisper`.
 
-### Transformers backend + Offline mode
+### Transformers + Offline
 
-Upload a `wav`, `mp3`, or `m4a` file. The app loads PhoWhisper natively through
-`transformers`, transcribes the full file as Vietnamese text, then translates
-the Vietnamese output with `opus-mt-vi-en`.
+Upload a `wav`, `mp3`, or `m4a` file. The app loads PhoWhisper through
+`transformers` and transcribes the full file as Vietnamese text.
 
-### Transformers backend + Streaming mode
+### Transformers + Streaming
 
 The browser microphone is captured through `streamlit-webrtc`. The app uses a
 manual RMS/silence threshold and rolling buffer for chunk finalization, then
-transcribes each chunk with PhoWhisper through `transformers` and translates
-with `opus-mt-vi-en`.
+transcribes each chunk with PhoWhisper through `transformers`.
 
-### Cascaded Encoder backend + Offline mode
+### Cascaded Encoder + Offline
 
 Upload a `wav`, `mp3`, or `m4a` file. The app loads the notebook-exported
-`cascaded_phowhisper.pt`, reconstructs the cascaded encoder architecture, runs
-Vietnamese ASR in PyTorch, then translates the Vietnamese output with
-`opus-mt-vi-en`.
+`cascaded_phowhisper.pt`, reconstructs the cascaded encoder architecture, and
+runs Vietnamese ASR in PyTorch.
 
-### Cascaded Encoder backend + Streaming mode
+### Cascaded Encoder + Streaming
 
 The browser microphone is captured through `streamlit-webrtc`. The app uses the
-same manual rolling buffer and RMS/silence threshold as the Transformers
-streaming path, then runs each finalized chunk through the notebook-exported
-Cascaded Encoder checkpoint and translates with `opus-mt-vi-en`.
+same rolling buffer and RMS/silence threshold as the Transformers streaming
+path, then runs each finalized chunk through the Cascaded Encoder checkpoint.
 
-## Device and Precision
+## Device And Precision
 
 The sidebar exposes `auto`, `cuda`, and `cpu`.
 
@@ -247,18 +248,24 @@ The sidebar exposes `auto`, `cuda`, and `cpu`.
 - Cascaded Encoder on CUDA uses `torch.float16`.
 - Cascaded Encoder on CPU uses `torch.float32`.
 
-If CUDA is selected but unavailable, the app falls back to CPU and displays a
-warning.
+If CUDA is selected but unavailable, the app warns and falls back to CPU.
 
-## Hugging Face Model Caching
+## WebRTC Notes
 
-PhoWhisper and `Helsinki-NLP/opus-mt-vi-en` are downloaded through Hugging Face
-the first time they are selected. Streamlit caches loaded model objects with
-`st.cache_resource`, so subsequent runs in the same process reuse the loaded
-models.
+The app passes an explicit WebRTC ICE configuration so it does not depend on
+Hugging Face TURN credentials. By default it uses Google STUN:
 
-Use `HF_HOME`, `TRANSFORMERS_CACHE`, or the default Hugging Face cache location
-to control where model files are stored.
+```text
+stun:stun.l.google.com:19302
+```
+
+For stricter networks, provide your own TURN server:
+
+```bash
+WEBRTC_TURN_URLS=turn:your-turn-server:3478
+WEBRTC_TURN_USERNAME=your-user
+WEBRTC_TURN_CREDENTIAL=your-password
+```
 
 ## Error Handling
 
@@ -268,12 +275,12 @@ The app handles:
 - missing microphone permission or stopped WebRTC stream;
 - unsupported audio file formats;
 - missing or unconverted CTranslate2 checkpoints for Faster-Whisper;
+- missing Cascaded Encoder notebook exports;
 - CUDA selection when CUDA is unavailable;
 - model download/load failures surfaced as Streamlit errors.
 
 ## Development Notes
 
 The UI calls only `pipeline.run_offline` and `pipeline.run_streaming`. ASR
-loading and inference live under `asr/`, and translation is isolated under
-`translate/`. This keeps ASR backends, offline/streaming orchestration, and
-translation independently testable.
+loading and inference live under `asr/`; streaming/offline orchestration lives
+in `pipeline.py`.

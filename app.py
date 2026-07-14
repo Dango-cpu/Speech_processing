@@ -14,7 +14,6 @@ from tunnel import start_ngrok_tunnel
 
 DEFAULT_HF_MODEL = "vinai/PhoWhisper-base"
 DEFAULT_CASCADE_ROOT = "checkpoints/cascaded_phowhisper_ckpt"
-DEFAULT_LOCAL_PHOWHISPER = "checkpoints/phowhisper-base"
 PHOWHISPER_MODELS = {
     "tiny": "vinai/PhoWhisper-tiny",
     "base": "vinai/PhoWhisper-base",
@@ -196,10 +195,7 @@ def sidebar_controls() -> dict[str, object]:
         default_model = DEFAULT_CASCADE_ROOT
         help_text = "Use a checkpoint exported by the Cascaded PhoWhisper training notebook."
     else:
-        default_model = os.getenv(
-            "APP_DEFAULT_PHOWHISPER_MODEL_PATH",
-            PHOWHISPER_MODELS.get(model_size) or DEFAULT_HF_MODEL,
-        )
+        default_model = PHOWHISPER_MODELS.get(model_size) or DEFAULT_HF_MODEL
         help_text = "Use a Hugging Face or local PhoWhisper checkpoint."
 
     model_name_or_path = custom_model.strip() or default_model
@@ -238,12 +234,7 @@ def sidebar_controls() -> dict[str, object]:
         else:
             st.warning(status_text)
 
-        should_auto_preload = os.getenv("APP_PRELOAD_MODELS", "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        if st.button("Load selected ASR model") or should_auto_preload:
+        if st.button("Load selected ASR model"):
             with st.status("Loading selected ASR model...", expanded=True) as status:
                 try:
                     message = preload_selected_asr_model(
