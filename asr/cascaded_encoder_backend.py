@@ -220,7 +220,24 @@ def checkpoint_to_config(checkpoint: dict) -> CascadedConfig:
         fast_num_layers=int(checkpoint["fast_num_layers"]),
         fast_num_heads=int(checkpoint["fast_num_heads"]),
         fast_ffn_dim=int(checkpoint["fast_ffn_dim"]),
+        language=str(checkpoint.get("language", "vi")),
+        task=str(checkpoint.get("task", "transcribe")),
+        max_new_tokens=int(checkpoint.get("max_new_tokens", 96)),
     )
+
+
+def load_base_phowhisper(model_name_or_path: str, dtype: torch.dtype):
+    try:
+        return WhisperForConditionalGeneration.from_pretrained(
+            model_name_or_path,
+            torch_dtype=dtype,
+            attn_implementation="eager",
+        )
+    except TypeError:
+        return WhisperForConditionalGeneration.from_pretrained(
+            model_name_or_path,
+            torch_dtype=dtype,
+        )
 
 
 @st.cache_resource(show_spinner="Loading notebook-exported Cascaded PhoWhisper...")
@@ -237,10 +254,7 @@ def load_cascaded_encoder(checkpoint_path: str, device: str):
     processor_dir = checkpoint_file.parent / "processor"
     processor_source = str(processor_dir) if processor_dir.exists() else cfg.model_id
     processor = WhisperProcessor.from_pretrained(processor_source)
-    base_model = WhisperForConditionalGeneration.from_pretrained(
-        base_model_source,
-        torch_dtype=dtype,
-    )
+    base_model = load_base_phowhisper(base_model_source, dtype)
     model = CascadedPhoWhisperForConditionalGeneration(base_model, cfg)
     model.load_state_dict(state_dict, strict=True)
     model.to(device=device, dtype=dtype)
