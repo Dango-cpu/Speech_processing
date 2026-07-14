@@ -24,6 +24,9 @@ PHOWHISPER_MODELS = {
 }
 
 
+st.set_page_config(page_title="faster-phowhisper", layout="wide")
+
+
 def default_ct2_model_path(model_size: str) -> str:
     if model_size == "custom":
         return "checkpoints/phowhisper-base-ct2"
@@ -64,80 +67,85 @@ def local_checkpoint_hint(asr_backend: str, model_name_or_path: str) -> str | No
     return None
 
 
+def model_status(asr_backend: str, model_name_or_path: str) -> tuple[str, str]:
+    path = Path(model_name_or_path)
+    if asr_backend == "faster_whisper":
+        if (path / "model.bin").exists():
+            return "ready", "Local CTranslate2 checkpoint found."
+        if is_probably_local_path(model_name_or_path):
+            return "missing", "Local CTranslate2 checkpoint is missing model.bin."
+        return "remote", "Remote CTranslate2 repo will be resolved by faster-whisper."
+    if asr_backend == "cascaded_encoder":
+        if path.is_file() and path.name == "cascaded_phowhisper.pt":
+            return "ready", "Cascaded checkpoint file found."
+        if (path / "cascaded_phowhisper.pt").exists():
+            return "ready", "Cascaded step checkpoint found."
+        if path.exists() and any(path.glob("step_*/cascaded_phowhisper.pt")):
+            return "ready", "Cascaded checkpoint root found."
+        return "missing", "Cascaded notebook export is not present."
+    if Path(model_name_or_path).exists():
+        return "ready", "Local PhoWhisper Transformers checkpoint found."
+    return "remote", "Hugging Face PhoWhisper checkpoint will be downloaded/cached."
+
+
 @st.cache_resource(show_spinner=False)
-def preload_hosted_runtime_models(
+def preload_selected_asr_model(
+    asr_backend: str,
+    model_name_or_path: str,
     device: str,
     compute_type: str | None,
-    phowhisper_model_path: str,
-    ct2_model_path: str,
-    cascade_model_path: str,
-    translate_enabled: bool,
-) -> list[str]:
-    loaded: list[str] = []
-
-    from translate.opus_mt import resolve_device as resolve_translation_device
-
-    resolved_device = resolve_translation_device(device)
-    if translate_enabled:
-        from translate.opus_mt import (
-            TRANSLATION_MODEL_ENV,
-            TRANSLATION_MODEL_ID,
-            load_translation_model,
-        )
-
-        translation_path = os.getenv(TRANSLATION_MODEL_ENV, TRANSLATION_MODEL_ID)
-        load_translation_model(resolved_device, translation_path)
-        loaded.append(f"opus-mt-vi-en on {resolved_device}")
-
-    if phowhisper_model_path and Path(phowhisper_model_path).exists():
-        from asr.transformers_backend import load_transformers_model
-
-        load_transformers_model(phowhisper_model_path, resolved_device)
-        loaded.append(f"PhoWhisper Transformers on {resolved_device}")
-
-    if ct2_model_path and (Path(ct2_model_path) / "model.bin").exists():
+) -> str:
+    if asr_backend == "faster_whisper":
         from asr.faster_whisper_backend import (
             default_compute_type,
             load_faster_whisper_model,
-            resolve_device as resolve_fw_device,
+            resolve_device,
         )
 
-        fw_device = resolve_fw_device(device)
-        load_faster_whisper_model(
-            ct2_model_path,
-            fw_device,
-            default_compute_type(fw_device, compute_type),
+        resolved_device = resolve_device(device)
+        resolved_compute_type = default_compute_type(resolved_device, compute_type)
+        load_faster_whisper_model(model_name_or_path, resolved_device, resolved_compute_type)
+        return f"Faster-Whisper PhoWhisper loaded on {resolved_device} ({resolved_compute_type})."
+
+    if asr_backend == "transformers":
+        from asr.transformers_backend import load_transformers_model, resolve_device
+
+        resolved_device = resolve_device(device)
+        load_transformers_model(model_name_or_path, resolved_device)
+        return f"Transformers PhoWhisper loaded on {resolved_device}."
+
+    if asr_backend == "cascaded_encoder":
+        from asr.cascaded_encoder_backend import load_cascaded_encoder
+        from asr.transformers_backend import resolve_device
+
+        resolved_device = resolve_device(device)
+        load_cascaded_encoder(model_name_or_path, resolved_device)
+        return f"Cascaded Encoder PhoWhisper loaded on {resolved_device}."
+
+    raise ValueError(f"Unsupported ASR backend: {asr_backend}")
+
+
+def build_rtc_configuration() -> dict[str, object]:
+    ice_servers: list[dict[str, object]] = [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+    ]
+    turn_urls = os.getenv("WEBRTC_TURN_URLS")
+    turn_username = os.getenv("WEBRTC_TURN_USERNAME")
+    turn_credential = os.getenv("WEBRTC_TURN_CREDENTIAL")
+    if turn_urls and turn_username and turn_credential:
+        ice_servers.append(
+            {
+                "urls": [url.strip() for url in turn_urls.split(",") if url.strip()],
+                "username": turn_username,
+                "credential": turn_credential,
+            }
         )
-        loaded.append(f"PhoWhisper CTranslate2 on {fw_device}")
-
-    if cascade_model_path and Path(cascade_model_path).exists():
-        from asr.cascaded_encoder_backend import (
-            load_cascaded_encoder,
-            resolve_checkpoint_file,
-        )
-
-        try:
-            resolve_checkpoint_file(cascade_model_path)
-            load_cascaded_encoder(cascade_model_path, resolved_device)
-            loaded.append(f"Cascaded Encoder on {resolved_device}")
-        except FileNotFoundError:
-            pass
-
-    return loaded
-
-
-st.set_page_config(
-    page_title="faster-phowhisper",
-    layout="wide",
-)
+    return {"iceServers": ice_servers}
 
 
 def init_state() -> None:
     st.session_state.setdefault("stream_state", StreamingState())
-    st.session_state.setdefault(
-        "stream_result",
-        {"segments": [], "vi_text": "", "en_text": "", "translate_enabled": True},
-    )
+    st.session_state.setdefault("stream_result", {"segments": [], "vi_text": ""})
 
 
 def sidebar_controls() -> dict[str, object]:
@@ -151,45 +159,48 @@ def sidebar_controls() -> dict[str, object]:
     else:
         st.sidebar.warning(tunnel_error)
 
-    asr_backend_label = st.sidebar.radio(
-        "ASR backend strategy",
-        [
-            "Faster-Whisper backend",
-            "Transformers backend",
-            "Cascaded Encoder backend",
-        ],
-        help=(
-            "All choices produce Vietnamese ASR, then opus-mt-vi-en performs "
-            "English translation. Cascaded Encoder loads the notebook-exported "
-            "PyTorch checkpoint."
-        ),
+    backend_options = [
+        "Faster-Whisper",
+        "Transformers",
+        "Cascaded Encoder",
+    ]
+    backend_env_to_label = {
+        "faster_whisper": "Faster-Whisper",
+        "transformers": "Transformers",
+        "cascaded_encoder": "Cascaded Encoder",
+    }
+    default_backend_label = backend_env_to_label.get(
+        os.getenv("APP_DEFAULT_ASR_BACKEND", "faster_whisper"),
+        "Faster-Whisper",
     )
-    if asr_backend_label == "Faster-Whisper backend":
-        asr_backend = "faster_whisper"
-    elif asr_backend_label == "Transformers backend":
-        asr_backend = "transformers"
-    else:
-        asr_backend = "cascaded_encoder"
+    asr_backend_label = st.sidebar.radio(
+        "ASR backend",
+        backend_options,
+        index=backend_options.index(default_backend_label),
+        help="All backends produce Vietnamese transcripts with PhoWhisper.",
+    )
+    asr_backend = {
+        "Faster-Whisper": "faster_whisper",
+        "Transformers": "transformers",
+        "Cascaded Encoder": "cascaded_encoder",
+    }[asr_backend_label]
 
     input_mode = st.sidebar.radio("Input mode", ["Offline mode", "Streaming mode"])
     model_size = st.sidebar.selectbox("PhoWhisper model size", list(PHOWHISPER_MODELS), index=1)
-    custom_model = st.sidebar.text_input("Custom PhoWhisper model/path", "")
+    custom_model = st.sidebar.text_input("Custom model/checkpoint path", "")
 
     if asr_backend == "faster_whisper":
         default_model = default_ct2_model_path(model_size)
-        help_text = "Use a local CTranslate2-converted PhoWhisper directory or a CT2 model repo."
+        help_text = "Use a CTranslate2-converted PhoWhisper directory or CT2 model repo."
     elif asr_backend == "cascaded_encoder":
         default_model = DEFAULT_CASCADE_ROOT
-        help_text = (
-            "Use a checkpoint exported by notebooks/train_cascaded_phowhisper_colab_kaggle.ipynb. "
-            "The root may contain step_* folders; the newest step is selected automatically."
-        )
+        help_text = "Use a checkpoint exported by the Cascaded PhoWhisper training notebook."
     else:
         default_model = os.getenv(
             "APP_DEFAULT_PHOWHISPER_MODEL_PATH",
             PHOWHISPER_MODELS.get(model_size) or DEFAULT_HF_MODEL,
         )
-        help_text = "Use a Hugging Face PhoWhisper checkpoint, e.g. vinai/PhoWhisper-base."
+        help_text = "Use a Hugging Face or local PhoWhisper checkpoint."
 
     model_name_or_path = custom_model.strip() or default_model
     st.sidebar.caption(help_text)
@@ -197,68 +208,59 @@ def sidebar_controls() -> dict[str, object]:
     if checkpoint_hint:
         st.sidebar.warning(checkpoint_hint)
 
-    translate_default = os.getenv("APP_TRANSLATE_ENABLED", "1").lower() not in {
-        "0",
-        "false",
-        "no",
-    }
-    translate_enabled = st.sidebar.checkbox(
-        "Translate transcript to English",
-        value=translate_default,
-        help="Turn this off to run Vietnamese ASR only and avoid loading opus-mt-vi-en.",
-    )
-
     device_options = ["auto", "cuda", "cpu"]
     default_device = os.getenv("APP_DEFAULT_DEVICE", "auto")
-    device_index = (
-        device_options.index(default_device)
-        if default_device in device_options
-        else 0
+    device = st.sidebar.selectbox(
+        "Device",
+        device_options,
+        index=device_options.index(default_device) if default_device in device_options else 0,
     )
-    device = st.sidebar.selectbox("Device", device_options, index=device_index)
+
     compute_options = ["auto", "float16", "int8_float16", "int8", "float32"]
     default_compute_type = os.getenv("APP_DEFAULT_COMPUTE_TYPE", "auto")
-    compute_index = (
-        compute_options.index(default_compute_type)
-        if default_compute_type in compute_options
-        else 0
-    )
     compute_type = st.sidebar.selectbox(
         "Faster-Whisper compute type",
         compute_options,
-        index=compute_index,
+        index=compute_options.index(default_compute_type)
+        if default_compute_type in compute_options
+        else 0,
         disabled=asr_backend != "faster_whisper",
     )
 
-    if os.getenv("APP_PRELOAD_MODELS", "").lower() in {"1", "true", "yes"}:
-        with st.sidebar.status("Preloading models on hosted GPU...", expanded=False) as status:
-            try:
-                loaded = preload_hosted_runtime_models(
-                    device=device,
-                    compute_type=None if compute_type == "auto" else compute_type,
-                    phowhisper_model_path=os.getenv(
-                        "APP_PRELOAD_PHOWHISPER_MODEL_PATH",
-                        DEFAULT_LOCAL_PHOWHISPER,
-                    ),
-                    ct2_model_path=os.getenv(
-                        "APP_PRELOAD_CT2_MODEL_PATH",
-                        default_ct2_model_path(model_size),
-                    ),
-                    cascade_model_path=os.getenv(
-                        "APP_PRELOAD_CASCADE_MODEL_PATH",
-                        DEFAULT_CASCADE_ROOT,
-                    ),
-                    translate_enabled=translate_enabled,
-                )
-                for item in loaded:
-                    st.sidebar.caption(f"Loaded: {item}")
-                status.update(label="Hosted GPU model preload complete", state="complete")
-            except Exception as exc:
-                status.update(label="Hosted GPU preload skipped/failed", state="error")
-                st.sidebar.warning(f"Model preload failed: {exc}")
+    status_kind, status_text = model_status(asr_backend, model_name_or_path)
+    with st.sidebar.expander("Model status", expanded=True):
+        st.write(f"Backend: `{asr_backend_label}`")
+        st.write(f"Model: `{model_name_or_path}`")
+        if status_kind == "ready":
+            st.success(status_text)
+        elif status_kind == "remote":
+            st.info(status_text)
+        else:
+            st.warning(status_text)
+
+        should_auto_preload = os.getenv("APP_PRELOAD_MODELS", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if st.button("Load selected ASR model") or should_auto_preload:
+            with st.status("Loading selected ASR model...", expanded=True) as status:
+                try:
+                    message = preload_selected_asr_model(
+                        asr_backend=asr_backend,
+                        model_name_or_path=model_name_or_path,
+                        device=device,
+                        compute_type=None if compute_type == "auto" else compute_type,
+                    )
+                    st.write(message)
+                    status.update(label="ASR model ready", state="complete")
+                except Exception as exc:
+                    status.update(label="ASR model load failed", state="error")
+                    st.error(exc)
+
     beam_size = st.sidebar.slider("Beam size", min_value=1, max_value=8, value=5)
 
-    with st.sidebar.expander("Streaming chunking"):
+    with st.sidebar.expander("Streaming"):
         chunk_seconds = st.slider("Chunk seconds", 2.0, 12.0, 6.0, 0.5)
         overlap_seconds = st.slider("Overlap seconds", 0.0, 2.0, 0.5, 0.1)
         min_rms = st.slider("Silence threshold", 0.001, 0.05, 0.008, 0.001)
@@ -274,12 +276,7 @@ def sidebar_controls() -> dict[str, object]:
                 overlap_seconds=overlap_seconds,
                 min_rms=min_rms,
             )
-            st.session_state.stream_result = {
-                "segments": [],
-                "vi_text": "",
-                "en_text": "",
-                "translate_enabled": translate_enabled,
-            }
+            st.session_state.stream_result = {"segments": [], "vi_text": ""}
             st.rerun()
 
     return {
@@ -293,35 +290,36 @@ def sidebar_controls() -> dict[str, object]:
         "overlap_seconds": overlap_seconds,
         "min_rms": min_rms,
         "audio_receiver_size": audio_receiver_size,
-        "translate_enabled": translate_enabled,
     }
 
 
 def render_result(result: dict[str, object]) -> None:
-    translate_enabled = bool(result.get("translate_enabled", True))
-    if translate_enabled:
-        left, right = st.columns(2)
-    else:
-        left = st.container()
-        right = None
+    st.subheader("Vietnamese transcript")
+    transcript = str(result.get("vi_text", ""))
+    st.text_area(
+        "Vietnamese transcript",
+        transcript,
+        height=280,
+        label_visibility="collapsed",
+    )
 
-    with left:
-        st.subheader("Vietnamese transcript")
-        st.text_area("Vietnamese transcript", result.get("vi_text", ""), height=260, label_visibility="collapsed")
-    if right is not None:
-        with right:
-            st.subheader("English translation")
-            st.text_area("English translation", result.get("en_text", ""), height=260, label_visibility="collapsed")
+    if transcript:
+        st.download_button(
+            "Download transcript",
+            transcript,
+            file_name="phowhisper_transcript.txt",
+            mime="text/plain",
+        )
 
     segments = result.get("segments", [])
     if segments:
         st.subheader("Segments")
         rows = [
-            ({
+            {
                 "start": round(segment.start, 2),
                 "end": round(segment.end, 2),
                 "vi_text": segment.vi_text,
-            } | ({"en_text": segment.en_text} if translate_enabled else {}))
+            }
             for segment in segments
         ]
         st.dataframe(rows, use_container_width=True, hide_index=True)
@@ -334,22 +332,12 @@ def run_offline_ui(config: dict[str, object]) -> None:
         return
 
     st.audio(uploaded)
-    action_label = (
-        "Transcribe and translate"
-        if config["translate_enabled"]
-        else "Transcribe"
-    )
-    if st.button(action_label, type="primary"):
+    if st.button("Transcribe", type="primary"):
         try:
             suffix = Path(uploaded.name).suffix
             audio_path = save_uploaded_audio(uploaded, suffix)
-            status_text = (
-                "Running PhoWhisper ASR and opus-mt-vi-en translation..."
-                if config["translate_enabled"]
-                else "Running PhoWhisper ASR..."
-            )
-            with st.status(status_text, expanded=True):
-                st.write("Loading or reusing cached models from Hugging Face/local cache.")
+            with st.status("Running PhoWhisper ASR...", expanded=True):
+                st.write("Loading or reusing the cached ASR model.")
                 result = run_offline(
                     audio=audio_path,
                     asr_backend=str(config["asr_backend"]),
@@ -357,7 +345,6 @@ def run_offline_ui(config: dict[str, object]) -> None:
                     device=str(config["device"]),
                     compute_type=config["compute_type"],
                     beam_size=int(config["beam_size"]),
-                    translate_enabled=bool(config["translate_enabled"]),
                 )
                 st.write("Finished.")
             render_result(result)
@@ -383,14 +370,14 @@ def run_streaming_ui(config: dict[str, object]) -> None:
     state.chunk_seconds = float(config["chunk_seconds"])
     state.overlap_seconds = float(config["overlap_seconds"])
     state.min_rms = float(config["min_rms"])
-    st.session_state.stream_result["translate_enabled"] = bool(config["translate_enabled"])
 
-    st.caption("Allow microphone access in the browser. Finalized chunks appear below as the rolling buffer fills.")
+    st.caption("Allow microphone access in the browser. Finalized Vietnamese chunks appear below.")
     ctx = webrtc_streamer(
         key="phowhisper-mic",
         mode=WebRtcMode.SENDONLY,
         media_stream_constraints={"audio": True, "video": False},
         audio_receiver_size=int(config["audio_receiver_size"]),
+        rtc_configuration=build_rtc_configuration(),
     )
 
     if not ctx.state.playing:
@@ -415,7 +402,6 @@ def run_streaming_ui(config: dict[str, object]) -> None:
                 device=str(config["device"]),
                 compute_type=config["compute_type"],
                 beam_size=min(int(config["beam_size"]), 3),
-                translate_enabled=bool(config["translate_enabled"]),
             )
         except Exception as exc:
             st.error(f"Streaming processing failed: {exc}")
@@ -430,9 +416,8 @@ def main() -> None:
 
     st.title("faster-phowhisper")
     st.caption(
-        "PhoWhisper Vietnamese ASR with Faster-Whisper/CTranslate2, Transformers, "
-        "or a notebook-exported Cascaded Encoder, followed by explicit "
-        "Helsinki-NLP/opus-mt-vi-en translation."
+        "Vietnamese speech recognition with PhoWhisper through Faster-Whisper, "
+        "Transformers, or a notebook-exported Cascaded Encoder."
     )
 
     if config["input_mode"] == "Offline mode":
