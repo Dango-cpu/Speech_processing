@@ -14,6 +14,7 @@ from tunnel import start_ngrok_tunnel
 
 DEFAULT_HF_MODEL = "vinai/PhoWhisper-base"
 DEFAULT_CASCADE_ROOT = "checkpoints/cascaded_phowhisper_ckpt"
+DEFAULT_LOCAL_PHOWHISPER = "checkpoints/phowhisper-base"
 PHOWHISPER_MODELS = {
     "tiny": "vinai/PhoWhisper-tiny",
     "base": "vinai/PhoWhisper-base",
@@ -61,6 +62,65 @@ def local_checkpoint_hint(asr_backend: str, model_name_or_path: str) -> str | No
                 "cascaded_phowhisper.pt inside a step_* folder or selected directly."
             )
     return None
+
+
+@st.cache_resource(show_spinner=False)
+def preload_hosted_runtime_models(
+    device: str,
+    compute_type: str | None,
+    phowhisper_model_path: str,
+    ct2_model_path: str,
+    cascade_model_path: str,
+) -> list[str]:
+    loaded: list[str] = []
+
+    from translate.opus_mt import (
+        TRANSLATION_MODEL_ENV,
+        TRANSLATION_MODEL_ID,
+        load_translation_model,
+        resolve_device as resolve_translation_device,
+    )
+
+    resolved_device = resolve_translation_device(device)
+    translation_path = os.getenv(TRANSLATION_MODEL_ENV, TRANSLATION_MODEL_ID)
+    load_translation_model(resolved_device, translation_path)
+    loaded.append(f"opus-mt-vi-en on {resolved_device}")
+
+    if phowhisper_model_path and Path(phowhisper_model_path).exists():
+        from asr.transformers_backend import load_transformers_model
+
+        load_transformers_model(phowhisper_model_path, resolved_device)
+        loaded.append(f"PhoWhisper Transformers on {resolved_device}")
+
+    if ct2_model_path and (Path(ct2_model_path) / "model.bin").exists():
+        from asr.faster_whisper_backend import (
+            default_compute_type,
+            load_faster_whisper_model,
+            resolve_device as resolve_fw_device,
+        )
+
+        fw_device = resolve_fw_device(device)
+        load_faster_whisper_model(
+            ct2_model_path,
+            fw_device,
+            default_compute_type(fw_device, compute_type),
+        )
+        loaded.append(f"PhoWhisper CTranslate2 on {fw_device}")
+
+    if cascade_model_path and Path(cascade_model_path).exists():
+        from asr.cascaded_encoder_backend import (
+            load_cascaded_encoder,
+            resolve_checkpoint_file,
+        )
+
+        try:
+            resolve_checkpoint_file(cascade_model_path)
+            load_cascaded_encoder(cascade_model_path, resolved_device)
+            loaded.append(f"Cascaded Encoder on {resolved_device}")
+        except FileNotFoundError:
+            pass
+
+    return loaded
 
 
 st.set_page_config(
@@ -119,7 +179,10 @@ def sidebar_controls() -> dict[str, object]:
             "The root may contain step_* folders; the newest step is selected automatically."
         )
     else:
-        default_model = PHOWHISPER_MODELS.get(model_size) or DEFAULT_HF_MODEL
+        default_model = os.getenv(
+            "APP_DEFAULT_PHOWHISPER_MODEL_PATH",
+            PHOWHISPER_MODELS.get(model_size) or DEFAULT_HF_MODEL,
+        )
         help_text = "Use a Hugging Face PhoWhisper checkpoint, e.g. vinai/PhoWhisper-base."
 
     model_name_or_path = custom_model.strip() or default_model
@@ -149,6 +212,32 @@ def sidebar_controls() -> dict[str, object]:
         index=compute_index,
         disabled=asr_backend != "faster_whisper",
     )
+
+    if os.getenv("APP_PRELOAD_MODELS", "").lower() in {"1", "true", "yes"}:
+        with st.sidebar.status("Preloading models on hosted GPU...", expanded=False) as status:
+            try:
+                loaded = preload_hosted_runtime_models(
+                    device=device,
+                    compute_type=None if compute_type == "auto" else compute_type,
+                    phowhisper_model_path=os.getenv(
+                        "APP_PRELOAD_PHOWHISPER_MODEL_PATH",
+                        DEFAULT_LOCAL_PHOWHISPER,
+                    ),
+                    ct2_model_path=os.getenv(
+                        "APP_PRELOAD_CT2_MODEL_PATH",
+                        default_ct2_model_path(model_size),
+                    ),
+                    cascade_model_path=os.getenv(
+                        "APP_PRELOAD_CASCADE_MODEL_PATH",
+                        DEFAULT_CASCADE_ROOT,
+                    ),
+                )
+                for item in loaded:
+                    st.sidebar.caption(f"Loaded: {item}")
+                status.update(label="Hosted GPU model preload complete", state="complete")
+            except Exception as exc:
+                status.update(label="Hosted GPU preload skipped/failed", state="error")
+                st.sidebar.warning(f"Model preload failed: {exc}")
     beam_size = st.sidebar.slider("Beam size", min_value=1, max_value=8, value=5)
 
     with st.sidebar.expander("Streaming chunking"):
