@@ -128,11 +128,25 @@ def sidebar_controls() -> dict[str, object]:
     if checkpoint_hint:
         st.sidebar.warning(checkpoint_hint)
 
-    device = st.sidebar.selectbox("Device", ["auto", "cuda", "cpu"], index=0)
+    device_options = ["auto", "cuda", "cpu"]
+    default_device = os.getenv("APP_DEFAULT_DEVICE", "auto")
+    device_index = (
+        device_options.index(default_device)
+        if default_device in device_options
+        else 0
+    )
+    device = st.sidebar.selectbox("Device", device_options, index=device_index)
+    compute_options = ["auto", "float16", "int8_float16", "int8", "float32"]
+    default_compute_type = os.getenv("APP_DEFAULT_COMPUTE_TYPE", "auto")
+    compute_index = (
+        compute_options.index(default_compute_type)
+        if default_compute_type in compute_options
+        else 0
+    )
     compute_type = st.sidebar.selectbox(
         "Faster-Whisper compute type",
-        ["auto", "float16", "int8_float16", "int8", "float32"],
-        index=0,
+        compute_options,
+        index=compute_index,
         disabled=asr_backend != "faster_whisper",
     )
     beam_size = st.sidebar.slider("Beam size", min_value=1, max_value=8, value=5)
