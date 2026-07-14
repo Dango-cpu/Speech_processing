@@ -141,6 +141,12 @@ def sidebar_controls() -> dict[str, object]:
         chunk_seconds = st.slider("Chunk seconds", 2.0, 12.0, 6.0, 0.5)
         overlap_seconds = st.slider("Overlap seconds", 0.0, 2.0, 0.5, 0.1)
         min_rms = st.slider("Silence threshold", 0.001, 0.05, 0.008, 0.001)
+        audio_receiver_size = st.select_slider(
+            "WebRTC receiver queue",
+            options=[256, 512, 1024, 2048, 4096],
+            value=2048,
+            help="Increase this if Streamlit reports a WebRTC queue overflow.",
+        )
         if st.button("Reset stream"):
             st.session_state.stream_state = StreamingState(
                 chunk_seconds=chunk_seconds,
@@ -160,6 +166,7 @@ def sidebar_controls() -> dict[str, object]:
         "chunk_seconds": chunk_seconds,
         "overlap_seconds": overlap_seconds,
         "min_rms": min_rms,
+        "audio_receiver_size": audio_receiver_size,
     }
 
 
@@ -238,7 +245,7 @@ def run_streaming_ui(config: dict[str, object]) -> None:
         key="phowhisper-mic",
         mode=WebRtcMode.SENDONLY,
         media_stream_constraints={"audio": True, "video": False},
-        audio_receiver_size=256,
+        audio_receiver_size=int(config["audio_receiver_size"]),
     )
 
     if not ctx.state.playing:
