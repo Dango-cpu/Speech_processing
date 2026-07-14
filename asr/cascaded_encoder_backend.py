@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import streamlit as st
@@ -232,11 +233,12 @@ def load_cascaded_encoder(checkpoint_path: str, device: str):
         raise ValueError("The cascaded checkpoint is missing model_state_dict.")
 
     dtype = torch.float16 if device == "cuda" else torch.float32
+    base_model_source = os.getenv("CASCADED_BASE_MODEL_PATH", cfg.model_id)
     processor_dir = checkpoint_file.parent / "processor"
     processor_source = str(processor_dir) if processor_dir.exists() else cfg.model_id
     processor = WhisperProcessor.from_pretrained(processor_source)
     base_model = WhisperForConditionalGeneration.from_pretrained(
-        cfg.model_id,
+        base_model_source,
         torch_dtype=dtype,
     )
     model = CascadedPhoWhisperForConditionalGeneration(base_model, cfg)
