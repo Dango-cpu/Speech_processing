@@ -71,20 +71,23 @@ def preload_hosted_runtime_models(
     phowhisper_model_path: str,
     ct2_model_path: str,
     cascade_model_path: str,
+    translate_enabled: bool,
 ) -> list[str]:
     loaded: list[str] = []
 
-    from translate.opus_mt import (
-        TRANSLATION_MODEL_ENV,
-        TRANSLATION_MODEL_ID,
-        load_translation_model,
-        resolve_device as resolve_translation_device,
-    )
+    from translate.opus_mt import resolve_device as resolve_translation_device
 
     resolved_device = resolve_translation_device(device)
-    translation_path = os.getenv(TRANSLATION_MODEL_ENV, TRANSLATION_MODEL_ID)
-    load_translation_model(resolved_device, translation_path)
-    loaded.append(f"opus-mt-vi-en on {resolved_device}")
+    if translate_enabled:
+        from translate.opus_mt import (
+            TRANSLATION_MODEL_ENV,
+            TRANSLATION_MODEL_ID,
+            load_translation_model,
+        )
+
+        translation_path = os.getenv(TRANSLATION_MODEL_ENV, TRANSLATION_MODEL_ID)
+        load_translation_model(resolved_device, translation_path)
+        loaded.append(f"opus-mt-vi-en on {resolved_device}")
 
     if phowhisper_model_path and Path(phowhisper_model_path).exists():
         from asr.transformers_backend import load_transformers_model
@@ -131,7 +134,10 @@ st.set_page_config(
 
 def init_state() -> None:
     st.session_state.setdefault("stream_state", StreamingState())
-    st.session_state.setdefault("stream_result", {"segments": [], "vi_text": "", "en_text": ""})
+    st.session_state.setdefault(
+        "stream_result",
+        {"segments": [], "vi_text": "", "en_text": "", "translate_enabled": True},
+    )
 
 
 def sidebar_controls() -> dict[str, object]:
@@ -191,6 +197,17 @@ def sidebar_controls() -> dict[str, object]:
     if checkpoint_hint:
         st.sidebar.warning(checkpoint_hint)
 
+    translate_default = os.getenv("APP_TRANSLATE_ENABLED", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+    translate_enabled = st.sidebar.checkbox(
+        "Translate transcript to English",
+        value=translate_default,
+        help="Turn this off to run Vietnamese ASR only and avoid loading opus-mt-vi-en.",
+    )
+
     device_options = ["auto", "cuda", "cpu"]
     default_device = os.getenv("APP_DEFAULT_DEVICE", "auto")
     device_index = (
@@ -231,6 +248,7 @@ def sidebar_controls() -> dict[str, object]:
                         "APP_PRELOAD_CASCADE_MODEL_PATH",
                         DEFAULT_CASCADE_ROOT,
                     ),
+                    translate_enabled=translate_enabled,
                 )
                 for item in loaded:
                     st.sidebar.caption(f"Loaded: {item}")
@@ -256,7 +274,12 @@ def sidebar_controls() -> dict[str, object]:
                 overlap_seconds=overlap_seconds,
                 min_rms=min_rms,
             )
-            st.session_state.stream_result = {"segments": [], "vi_text": "", "en_text": ""}
+            st.session_state.stream_result = {
+                "segments": [],
+                "vi_text": "",
+                "en_text": "",
+                "translate_enabled": translate_enabled,
+            }
             st.rerun()
 
     return {
@@ -270,28 +293,35 @@ def sidebar_controls() -> dict[str, object]:
         "overlap_seconds": overlap_seconds,
         "min_rms": min_rms,
         "audio_receiver_size": audio_receiver_size,
+        "translate_enabled": translate_enabled,
     }
 
 
 def render_result(result: dict[str, object]) -> None:
-    left, right = st.columns(2)
+    translate_enabled = bool(result.get("translate_enabled", True))
+    if translate_enabled:
+        left, right = st.columns(2)
+    else:
+        left = st.container()
+        right = None
+
     with left:
         st.subheader("Vietnamese transcript")
         st.text_area("Vietnamese transcript", result.get("vi_text", ""), height=260, label_visibility="collapsed")
-    with right:
-        st.subheader("English translation")
-        st.text_area("English translation", result.get("en_text", ""), height=260, label_visibility="collapsed")
+    if right is not None:
+        with right:
+            st.subheader("English translation")
+            st.text_area("English translation", result.get("en_text", ""), height=260, label_visibility="collapsed")
 
     segments = result.get("segments", [])
     if segments:
         st.subheader("Segments")
         rows = [
-            {
+            ({
                 "start": round(segment.start, 2),
                 "end": round(segment.end, 2),
                 "vi_text": segment.vi_text,
-                "en_text": segment.en_text,
-            }
+            } | ({"en_text": segment.en_text} if translate_enabled else {}))
             for segment in segments
         ]
         st.dataframe(rows, use_container_width=True, hide_index=True)
@@ -304,11 +334,21 @@ def run_offline_ui(config: dict[str, object]) -> None:
         return
 
     st.audio(uploaded)
-    if st.button("Transcribe and translate", type="primary"):
+    action_label = (
+        "Transcribe and translate"
+        if config["translate_enabled"]
+        else "Transcribe"
+    )
+    if st.button(action_label, type="primary"):
         try:
             suffix = Path(uploaded.name).suffix
             audio_path = save_uploaded_audio(uploaded, suffix)
-            with st.status("Running PhoWhisper ASR and opus-mt-vi-en translation...", expanded=True):
+            status_text = (
+                "Running PhoWhisper ASR and opus-mt-vi-en translation..."
+                if config["translate_enabled"]
+                else "Running PhoWhisper ASR..."
+            )
+            with st.status(status_text, expanded=True):
                 st.write("Loading or reusing cached models from Hugging Face/local cache.")
                 result = run_offline(
                     audio=audio_path,
@@ -317,6 +357,7 @@ def run_offline_ui(config: dict[str, object]) -> None:
                     device=str(config["device"]),
                     compute_type=config["compute_type"],
                     beam_size=int(config["beam_size"]),
+                    translate_enabled=bool(config["translate_enabled"]),
                 )
                 st.write("Finished.")
             render_result(result)
@@ -342,6 +383,7 @@ def run_streaming_ui(config: dict[str, object]) -> None:
     state.chunk_seconds = float(config["chunk_seconds"])
     state.overlap_seconds = float(config["overlap_seconds"])
     state.min_rms = float(config["min_rms"])
+    st.session_state.stream_result["translate_enabled"] = bool(config["translate_enabled"])
 
     st.caption("Allow microphone access in the browser. Finalized chunks appear below as the rolling buffer fills.")
     ctx = webrtc_streamer(
@@ -373,6 +415,7 @@ def run_streaming_ui(config: dict[str, object]) -> None:
                 device=str(config["device"]),
                 compute_type=config["compute_type"],
                 beam_size=min(int(config["beam_size"]), 3),
+                translate_enabled=bool(config["translate_enabled"]),
             )
         except Exception as exc:
             st.error(f"Streaming processing failed: {exc}")

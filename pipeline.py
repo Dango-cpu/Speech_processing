@@ -31,18 +31,24 @@ class StreamingState:
 def translate_segments(
     segments: list[ASRSegment],
     translation_device: str = "auto",
+    translate_enabled: bool = True,
 ) -> list[TranslatedSegment]:
     translated: list[TranslatedSegment] = []
     for segment in segments:
         vi_text = segment.text.strip()
         if not vi_text:
             continue
+        en_text = (
+            translate_vi_to_en(vi_text, device=translation_device)
+            if translate_enabled
+            else ""
+        )
         translated.append(
             TranslatedSegment(
                 start=segment.start,
                 end=segment.end,
                 vi_text=vi_text,
-                en_text=translate_vi_to_en(vi_text, device=translation_device),
+                en_text=en_text,
             )
         )
     return translated
@@ -55,6 +61,7 @@ def run_offline(
     device: str = "auto",
     compute_type: str | None = None,
     translation_device: str = "auto",
+    translate_enabled: bool = True,
     beam_size: int = 5,
 ) -> dict[str, object]:
     segments = transcribe(
@@ -66,8 +73,12 @@ def run_offline(
         beam_size=beam_size,
         vad_filter=asr_backend == "faster_whisper",
     )
-    translated_segments = translate_segments(segments, translation_device=translation_device)
-    return build_result(translated_segments)
+    translated_segments = translate_segments(
+        segments,
+        translation_device=translation_device,
+        translate_enabled=translate_enabled,
+    )
+    return build_result(translated_segments, translate_enabled=translate_enabled)
 
 
 def run_streaming(
@@ -78,6 +89,7 @@ def run_streaming(
     device: str = "auto",
     compute_type: str | None = None,
     translation_device: str = "auto",
+    translate_enabled: bool = True,
     beam_size: int = 3,
 ) -> dict[str, object]:
     sample_rate, samples = audio_chunk
@@ -93,7 +105,7 @@ def run_streaming(
     state.buffer = np.concatenate([state.buffer, samples])
     chunk_size = int(state.chunk_seconds * state.sample_rate)
     if state.buffer.size < chunk_size:
-        return build_result(state.finalized)
+        return build_result(state.finalized, translate_enabled=translate_enabled)
 
     current = state.buffer[:chunk_size]
     overlap = int(state.overlap_seconds * state.sample_rate)
@@ -107,7 +119,7 @@ def run_streaming(
         rms_threshold=state.min_rms,
         sample_rate=state.sample_rate,
     ):
-        return build_result(state.finalized)
+        return build_result(state.finalized, translate_enabled=translate_enabled)
 
     segments = transcribe(
         audio=(state.sample_rate, current),
@@ -118,7 +130,11 @@ def run_streaming(
         beam_size=beam_size,
         vad_filter=asr_backend == "faster_whisper",
     )
-    translated = translate_segments(segments, translation_device=translation_device)
+    translated = translate_segments(
+        segments,
+        translation_device=translation_device,
+        translate_enabled=translate_enabled,
+    )
     for segment in translated:
         state.finalized.append(
             TranslatedSegment(
@@ -129,12 +145,16 @@ def run_streaming(
             )
         )
 
-    return build_result(state.finalized)
+    return build_result(state.finalized, translate_enabled=translate_enabled)
 
 
-def build_result(segments: list[TranslatedSegment]) -> dict[str, object]:
+def build_result(
+    segments: list[TranslatedSegment],
+    translate_enabled: bool = True,
+) -> dict[str, object]:
     return {
         "segments": segments,
         "vi_text": " ".join(segment.vi_text for segment in segments).strip(),
         "en_text": " ".join(segment.en_text for segment in segments).strip(),
+        "translate_enabled": translate_enabled,
     }
